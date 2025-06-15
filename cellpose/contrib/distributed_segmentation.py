@@ -522,7 +522,12 @@ def read_preprocess_and_segment(
         log_file = pathlib.Path(worker_logs_directory).joinpath(log_file)
     cellpose.io.logger_setup(stdout_file_replacement=log_file)
     model = cellpose.models.CellposeModel(**model_kwargs)
-    return model.eval(image, **eval_kwargs)[0].astype(np.uint32)
+    segmentation = model.eval(image, **eval_kwargs)[0].astype(np.uint32)
+
+    if input_zarr.ndim == 4:
+        segmentation = np.expand_dims(segmentation, axis=0)
+
+    return segmentation
 
 
 def remove_overlaps(array, crop, overlap, blocksize):
