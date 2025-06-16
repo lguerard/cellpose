@@ -1,23 +1,28 @@
 # stdlib imports
-import os, getpass, datetime, pathlib, tempfile, functools, glob
+import datetime
+import functools
+import getpass
+import glob
+import os
+import pathlib
+import tempfile
+
+# distributed dependencies
+import dask
+import dask_image.ndmeasure
+import dask_jobqueue
+import distributed
+import imagecodecs
 
 # non-stdlib core dependencies
 import numpy as np
 import scipy
-import cellpose.io
-import cellpose.models
 import tifffile
-import imagecodecs
-
-# distributed dependencies
-import dask
-import distributed
-import dask_image.ndmeasure
 import yaml
 import zarr
-import dask_jobqueue
 
-
+import cellpose.io
+import cellpose.models
 
 
 ######################## File format functions ################################
@@ -44,7 +49,7 @@ def numpy_array_to_zarr(write_path, array, chunks):
 
     zarr_array = zarr.open(
         write_path,
-        mode='w',
+        mode="w",
         shape=array.shape,
         chunks=chunks,
         dtype=array.dtype,
@@ -55,7 +60,7 @@ def numpy_array_to_zarr(write_path, array, chunks):
 
 def wrap_folder_of_tiffs(
     filename_pattern,
-    block_index_pattern=r'_(Z)(\d+)(Y)(\d+)(X)(\d+)',
+    block_index_pattern=r"_(Z)(\d+)(Y)(\d+)(X)(\d+)",
 ):
     """
     Wrap a folder of tiff files with a zarr array without duplicating data.
@@ -97,7 +102,7 @@ def wrap_folder_of_tiffs(
 
     # define function to read individual files
     def imread(fname):
-        with open(fname, 'rb') as fh:
+        with open(fname, "rb") as fh:
             return imagecodecs.tiff_decode(fh.read(), index=None)
 
     # create zarr store, open it as zarr array and return
@@ -106,21 +111,20 @@ def wrap_folder_of_tiffs(
         aszarr=True,
         imread=imread,
         pattern=block_index_pattern,
-        axestiled={x:x for x in range(3)},
+        axestiled={x: x for x in range(3)},
     )
     return zarr.open(store=store)
 
 
-
-
 ######################## Cluster related functions ############################
 
-#----------------------- config stuff ----------------------------------------#
-DEFAULT_CONFIG_FILENAME = 'distributed_cellpose_dask_config.yaml'
+# ----------------------- config stuff ----------------------------------------#
+DEFAULT_CONFIG_FILENAME = "distributed_cellpose_dask_config.yaml"
+
 
 def _config_path(config_name):
     """Add config directory path to config filename"""
-    return str(pathlib.Path.home()) + '/.config/dask/' + config_name
+    return str(pathlib.Path.home()) + "/.config/dask/" + config_name
 
 
 def _modify_dask_config(
@@ -133,7 +137,7 @@ def _modify_dask_config(
     ensures that workers inherit config options.
     """
     dask.config.set(config)
-    with open(_config_path(config_name), 'w') as f:
+    with open(_config_path(config_name), "w") as f:
         yaml.dump(dask.config.config, f, default_flow_style=False)
 
 
@@ -142,10 +146,11 @@ def _remove_config_file(
 ):
     """Removes a config file from disk"""
     config_path = _config_path(config_name)
-    if os.path.exists(config_path): os.remove(config_path)
+    if os.path.exists(config_path):
+        os.remove(config_path)
 
 
-#----------------------- clusters --------------------------------------------#
+# ----------------------- clusters --------------------------------------------#
 class myLocalCluster(distributed.LocalCluster):
     """
     This is a thin wrapper extending dask.distributed.LocalCluster to set
@@ -183,31 +188,36 @@ class myLocalCluster(distributed.LocalCluster):
         self.persist_config = persist_config
         scratch_dir = f"{os.getcwd()}/"
         scratch_dir += f".{getpass.getuser()}_distributed_cellpose/"
-        config_defaults = {'temporary-directory':scratch_dir}
+        config_defaults = {"temporary-directory": scratch_dir}
         config = {**config_defaults, **config}
         _modify_dask_config(config, config_name)
 
         # construct
-        if "host" not in kwargs: kwargs["host"] = ""
+        if "host" not in kwargs:
+            kwargs["host"] = ""
         super().__init__(**kwargs)
         self.client = distributed.Client(self)
 
         # set environment variables for workers (threading)
         environment_vars = {
-            'MKL_NUM_THREADS':str(2*ncpus),
-            'NUM_MKL_THREADS':str(2*ncpus),
-            'OPENBLAS_NUM_THREADS':str(2*ncpus),
-            'OPENMP_NUM_THREADS':str(2*ncpus),
-            'OMP_NUM_THREADS':str(2*ncpus),
+            "MKL_NUM_THREADS": str(2 * ncpus),
+            "NUM_MKL_THREADS": str(2 * ncpus),
+            "OPENBLAS_NUM_THREADS": str(2 * ncpus),
+            "OPENMP_NUM_THREADS": str(2 * ncpus),
+            "OMP_NUM_THREADS": str(2 * ncpus),
         }
+
         def set_environment_vars():
             for k, v in environment_vars.items():
                 os.environ[k] = v
+
         self.client.run(set_environment_vars)
 
         print("Cluster dashboard link: ", self.dashboard_link)
 
-    def __enter__(self): return self
+    def __enter__(self):
+        return self
+
     def __exit__(self, exc_type, exc_value, traceback):
         if not self.persist_config:
             _remove_config_file(self.config_name)
@@ -241,9 +251,8 @@ class janeliaLSFCluster(dask_jobqueue.LSFCluster):
         config={},
         config_name=DEFAULT_CONFIG_FILENAME,
         persist_config=False,
-        **kwargs
+        **kwargs,
     ):
-
         # store all args in case needed later
         self.locals_store = {**locals()}
 
@@ -252,20 +261,20 @@ class janeliaLSFCluster(dask_jobqueue.LSFCluster):
         self.persist_config = persist_config
         scratch_dir = f"/scratch/{getpass.getuser()}/"
         config_defaults = {
-            'temporary-directory':scratch_dir,
-            'distributed.comm.timeouts.connect':'180s',
-            'distributed.comm.timeouts.tcp':'360s',
+            "temporary-directory": scratch_dir,
+            "distributed.comm.timeouts.connect": "180s",
+            "distributed.comm.timeouts.tcp": "360s",
         }
         config = {**config_defaults, **config}
         _modify_dask_config(config, config_name)
 
         # threading is best in low level libraries
         job_script_prologue = [
-            f"export MKL_NUM_THREADS={2*ncpus}",
-            f"export NUM_MKL_THREADS={2*ncpus}",
-            f"export OPENBLAS_NUM_THREADS={2*ncpus}",
-            f"export OPENMP_NUM_THREADS={2*ncpus}",
-            f"export OMP_NUM_THREADS={2*ncpus}",
+            f"export MKL_NUM_THREADS={2 * ncpus}",
+            f"export NUM_MKL_THREADS={2 * ncpus}",
+            f"export OPENBLAS_NUM_THREADS={2 * ncpus}",
+            f"export OPENMP_NUM_THREADS={2 * ncpus}",
+            f"export OMP_NUM_THREADS={2 * ncpus}",
         ]
 
         # set scratch and log directories
@@ -285,8 +294,8 @@ class janeliaLSFCluster(dask_jobqueue.LSFCluster):
             ncpus=ncpus,
             processes=1,
             cores=1,
-            memory=str(15*ncpus)+'GB',
-            mem=int(15e9*ncpus),
+            memory=str(15 * ncpus) + "GB",
+            mem=int(15e9 * ncpus),
             job_script_prologue=job_script_prologue,
             job_cls=quietLSFJob,
             **kwargs,
@@ -297,23 +306,22 @@ class janeliaLSFCluster(dask_jobqueue.LSFCluster):
         # set adaptive cluster bounds
         self.adapt_cluster(min_workers, max_workers)
 
+    def __enter__(self):
+        return self
 
-    def __enter__(self): return self
     def __exit__(self, exc_type, exc_value, traceback):
         if not self.persist_config:
             _remove_config_file(self.config_name)
         self.client.close()
         super().__exit__(exc_type, exc_value, traceback)
 
-
     def adapt_cluster(self, min_workers, max_workers):
         _ = self.adapt(
             minimum_jobs=min_workers,
             maximum_jobs=max_workers,
-            interval='10s',
+            interval="10s",
             wait_count=6,
         )
-
 
     def change_worker_attributes(
         self,
@@ -322,15 +330,15 @@ class janeliaLSFCluster(dask_jobqueue.LSFCluster):
         **kwargs,
     ):
         """WARNING: this function is dangerous if you don't know what
-           you're doing. Don't call this unless you know exactly what
-           this does."""
+        you're doing. Don't call this unless you know exactly what
+        this does."""
         self.scale(0)
         for k, v in kwargs.items():
-            self.new_spec['options'][k] = v
+            self.new_spec["options"][k] = v
         self.adapt_cluster(min_workers, max_workers)
 
 
-#----------------------- decorator -------------------------------------------#
+# ----------------------- decorator -------------------------------------------#
 def cluster(func):
     """
     This decorator ensures a function will run inside a cluster
@@ -341,29 +349,31 @@ def cluster(func):
     "cluster_kwargs" are used to construct a new cluster, and
     the function is run inside that cluster context.
     """
+
     @functools.wraps(func)
     def create_or_pass_cluster(*args, **kwargs):
         # TODO: this only checks if args are explicitly present in function call
         #       it does not check if they are set correctly in any way
-        assert 'cluster' in kwargs or 'cluster_kwargs' in kwargs, \
-        "Either cluster or cluster_kwargs must be defined"
-        if not 'cluster' in kwargs:
+        assert "cluster" in kwargs or "cluster_kwargs" in kwargs, (
+            "Either cluster or cluster_kwargs must be defined"
+        )
+        if not "cluster" in kwargs:
             cluster_constructor = myLocalCluster
-            F = lambda x: x in kwargs['cluster_kwargs']
-            if F('ncpus') and F('min_workers') and F('max_workers'):
+            F = lambda x: x in kwargs["cluster_kwargs"]
+            if F("ncpus") and F("min_workers") and F("max_workers"):
                 cluster_constructor = janeliaLSFCluster
-            with cluster_constructor(**kwargs['cluster_kwargs']) as cluster:
-                kwargs['cluster'] = cluster
+            with cluster_constructor(**kwargs["cluster_kwargs"]) as cluster:
+                kwargs["cluster"] = cluster
                 return func(*args, **kwargs)
         return func(*args, **kwargs)
+
     return create_or_pass_cluster
-
-
 
 
 ######################## the function to run on each block ####################
 
-#----------------------- The main function -----------------------------------#
+
+# ----------------------- The main function -----------------------------------#
 def process_block(
     block_index,
     crop,
@@ -483,26 +493,35 @@ def process_block(
         box_ids : 1D numpy array, parallel to boxes, the segment IDs of the
                   boxes
     """
-    print('RUNNING BLOCK: ', block_index, '\tREGION: ', crop, flush=True)
+    print("RUNNING BLOCK: ", block_index, "\tREGION: ", crop, flush=True)
     segmentation = read_preprocess_and_segment(
-        input_zarr, crop, preprocessing_steps, model_kwargs, eval_kwargs,
+        input_zarr,
+        crop,
+        preprocessing_steps,
+        model_kwargs,
+        eval_kwargs,
         worker_logs_directory,
     )
     segmentation, crop = remove_overlaps(
-        segmentation, crop, overlap, blocksize,
+        segmentation,
+        crop,
+        overlap,
+        blocksize,
     )
     boxes = bounding_boxes_in_global_coordinates(segmentation, crop)
     nblocks = get_nblocks(input_zarr.shape, blocksize)
     segmentation, remap = global_segment_ids(segmentation, block_index, nblocks)
-    if remap[0] == 0: remap = remap[1:]
+    if remap[0] == 0:
+        remap = remap[1:]
 
-    if test_mode: return segmentation, boxes, remap
+    if test_mode:
+        return segmentation, boxes, remap
     output_zarr[tuple(crop)] = segmentation
     faces = block_faces(segmentation)
     return faces, boxes, remap
 
 
-#----------------------- component functions ---------------------------------#
+# ----------------------- component functions ---------------------------------#
 def read_preprocess_and_segment(
     input_zarr,
     crop,
@@ -514,11 +533,11 @@ def read_preprocess_and_segment(
     """Read block from zarr array, run all preprocessing steps, run cellpose"""
     image = input_zarr[crop]
     for pp_step in preprocessing_steps:
-        pp_step[1]['crop'] = crop
+        pp_step[1]["crop"] = crop
         image = pp_step[0](image, **pp_step[1])
-    log_file=None
+    log_file = None
     if worker_logs_directory is not None:
-        log_file = f'dask_worker_{distributed.get_worker().name}.log'
+        log_file = f"dask_worker_{distributed.get_worker().name}.log"
         log_file = pathlib.Path(worker_logs_directory).joinpath(log_file)
     cellpose.io.logger_setup(stdout_file_replacement=log_file)
     model = cellpose.models.CellposeModel(**model_kwargs)
@@ -532,18 +551,22 @@ def read_preprocess_and_segment(
 
 def remove_overlaps(array, crop, overlap, blocksize):
     """overlaps only there to provide context for boundary voxels
-       and can be removed after segmentation is complete
-       reslice array to remove the overlaps"""
+    and can be removed after segmentation is complete
+    reslice array to remove the overlaps"""
     crop_trimmed = list(crop)
     for axis in range(array.ndim):
         if crop[axis].start != 0:
-            slc = [slice(None),]*array.ndim
+            slc = [
+                slice(None),
+            ] * array.ndim
             slc[axis] = slice(overlap, None)
             array = array[tuple(slc)]
             a, b = crop[axis].start, crop[axis].stop
             crop_trimmed[axis] = slice(a + overlap, b)
         if array.shape[axis] > blocksize[axis]:
-            slc = [slice(None),]*array.ndim
+            slc = [
+                slice(None),
+            ] * array.ndim
             slc[axis] = slice(None, blocksize[axis])
             array = array[tuple(slc)]
             a = crop_trimmed[axis].start
@@ -553,10 +576,10 @@ def remove_overlaps(array, crop, overlap, blocksize):
 
 def bounding_boxes_in_global_coordinates(segmentation, crop):
     """bounding boxes (tuples of slices) are super useful later
-       best to compute them now while things are distributed"""
+    best to compute them now while things are distributed"""
     boxes = scipy.ndimage.find_objects(segmentation)
     boxes = [b for b in boxes if b is not None]
-    translate = lambda a, b: slice(a.start+b.start, a.start+b.stop)
+    translate = lambda a, b: slice(a.start + b.start, a.start + b.stop)
     for iii, box in enumerate(boxes):
         boxes[iii] = tuple(translate(a, b) for a, b in zip(crop, box))
     return boxes
@@ -569,14 +592,15 @@ def get_nblocks(shape, blocksize):
 
 def global_segment_ids(segmentation, block_index, nblocks):
     """pack the block index into the segment IDs so they are
-       globally unique. Everything gets remapped to [1..N] later.
-       A uint32 is split into 5 digits on left and 5 digits on right.
-       This creates limits: 42950 maximum number of blocks and
-       99999 maximum number of segments per block"""
+    globally unique. Everything gets remapped to [1..N] later.
+    A uint32 is split into 5 digits on left and 5 digits on right.
+    This creates limits: 42950 maximum number of blocks and
+    99999 maximum number of segments per block"""
     unique, unique_inverse = np.unique(segmentation, return_inverse=True)
     p = str(np.ravel_multi_index(block_index, nblocks))
-    remap = [np.uint32(p+str(x).zfill(5)) for x in unique]
-    if unique[0] == 0: remap[0] = np.uint32(0)  # 0 should just always be 0
+    remap = [np.uint32(p + str(x).zfill(5)) for x in unique]
+    if unique[0] == 0:
+        remap[0] = np.uint32(0)  # 0 should just always be 0
     segmentation = np.array(remap)[unique_inverse.reshape(segmentation.shape)]
     return segmentation, remap
 
@@ -585,20 +609,23 @@ def block_faces(segmentation):
     """slice faces along every axis"""
     faces = []
     for iii in range(segmentation.ndim):
-        a = [slice(None),] * segmentation.ndim
+        a = [
+            slice(None),
+        ] * segmentation.ndim
         a[iii] = slice(0, 1)
         faces.append(segmentation[tuple(a)])
-        a = [slice(None),] * segmentation.ndim
+        a = [
+            slice(None),
+        ] * segmentation.ndim
         a[iii] = slice(-1, None)
         faces.append(segmentation[tuple(a)])
     return faces
 
 
-
-
 ######################## Distributed Cellpose #################################
 
-#----------------------- The main function -----------------------------------#
+
+# ----------------------- The main function -----------------------------------#
 @cluster
 def distributed_eval(
     input_zarr,
@@ -712,29 +739,33 @@ def distributed_eval(
         tuple in the list.
     """
 
-    timestamp = datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
-    worker_logs_dirname = f'dask_worker_logs_{timestamp}'
+    timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    worker_logs_dirname = f"dask_worker_logs_{timestamp}"
     worker_logs_dir = pathlib.Path().absolute().joinpath(worker_logs_dirname)
     worker_logs_dir.mkdir()
 
-    if 'diameter' not in eval_kwargs.keys():
-        eval_kwargs['diameter'] = 30
-    overlap = eval_kwargs['diameter'] * 2
+    if "diameter" not in eval_kwargs.keys():
+        eval_kwargs["diameter"] = 30
+    overlap = eval_kwargs["diameter"] * 2
     block_indices, block_crops = get_block_crops(
-        input_zarr.shape, blocksize, overlap, mask,
+        input_zarr.shape,
+        blocksize,
+        overlap,
+        mask,
     )
 
     # I hate indenting all that code just for the tempdir
     # but context manager is the only way to really guarantee that
     # the tempdir gets cleaned up even after unhandled exceptions
     with tempfile.TemporaryDirectory(
-        prefix='.', suffix='_distributed_cellpose_tempdir',
+        prefix=".",
+        suffix="_distributed_cellpose_tempdir",
         dir=temporary_directory or os.getcwd(),
     ) as temporary_directory:
-
-        temp_zarr_path = temporary_directory + '/segmentation_unstitched.zarr'
+        temp_zarr_path = temporary_directory + "/segmentation_unstitched.zarr"
         temp_zarr = zarr.open(
-            temp_zarr_path, 'w',
+            temp_zarr_path,
+            "w",
             shape=input_zarr.shape,
             chunks=blocksize,
             dtype=np.uint32,
@@ -754,29 +785,31 @@ def distributed_eval(
             worker_logs_directory=str(worker_logs_dir),
         )
         results = cluster.client.gather(futures)
-        if isinstance(cluster, dask_jobqueue.core.JobQueueCluster): 
+        if isinstance(cluster, dask_jobqueue.core.JobQueueCluster):
             cluster.scale(0)
 
         faces, boxes_, box_ids_ = list(zip(*results))
         boxes = [box for sublist in boxes_ for box in sublist]
-        box_ids = np.concatenate(box_ids_).astype(int)  # unsure how but without cast these are float64
+        box_ids = np.concatenate(box_ids_).astype(
+            int
+        )  # unsure how but without cast these are float64
         new_labeling = determine_merge_relabeling(block_indices, faces, box_ids)
         debug_unique = np.unique(new_labeling)
-        new_labeling_path = temporary_directory + '/new_labeling.npy'
+        new_labeling_path = temporary_directory + "/new_labeling.npy"
         np.save(new_labeling_path, new_labeling)
 
         # stitching step is cheap, we should release gpus and use small workers
-        if isinstance(cluster, dask_jobqueue.core.JobQueueCluster): 
+        if isinstance(cluster, dask_jobqueue.core.JobQueueCluster):
             cluster.change_worker_attributes(
-                min_workers=cluster.locals_store['min_workers'],
-                max_workers=cluster.locals_store['max_workers'],
+                min_workers=cluster.locals_store["min_workers"],
+                max_workers=cluster.locals_store["max_workers"],
                 ncpus=1,
                 memory="15GB",
                 mem=int(15e9),
                 queue=None,
                 job_extra_directives=[],
             )
-    
+
         segmentation_da = dask.array.from_zarr(temp_zarr)
         relabeled = dask.array.map_blocks(
             lambda block: np.load(new_labeling_path)[block],
@@ -786,15 +819,15 @@ def distributed_eval(
         )
         dask.array.to_zarr(relabeled, write_path, overwrite=True)
         merged_boxes = merge_all_boxes(boxes, new_labeling[box_ids])
-        return zarr.open(write_path, mode='r'), merged_boxes
+        return zarr.open(write_path, mode="r"), merged_boxes
 
 
-#----------------------- component functions ---------------------------------#
+# ----------------------- component functions ---------------------------------#
 def get_block_crops(shape, blocksize, overlap, mask):
     """Given a voxel grid shape, blocksize, and overlap size, construct
-       tuples of slices for every block; optionally only include blocks
-       that contain foreground in the mask. Returns parallel lists,
-       the block indices and the slice tuples."""
+    tuples of slices for every block; optionally only include blocks
+    that contain foreground in the mask. Returns parallel lists,
+    the block indices and the slice tuples."""
     blocksize = np.array(blocksize)
     if mask is not None:
         ratio = np.array(mask.shape) / shape
@@ -815,7 +848,8 @@ def get_block_crops(shape, blocksize, overlap, mask):
             stop = start + mask_blocksize
             stop = np.minimum(mask.shape, stop)
             mask_crop = tuple(slice(x, y) for x, y in zip(start, stop))
-            if not np.any(mask[mask_crop]): foreground = False
+            if not np.any(mask[mask_crop]):
+                foreground = False
         if foreground:
             indices.append(index)
             crops.append(crop)
@@ -824,7 +858,7 @@ def get_block_crops(shape, blocksize, overlap, mask):
 
 def determine_merge_relabeling(block_indices, faces, used_labels):
     """Determine boundary segment mergers, remap all label IDs to merge
-       and put all label IDs in range [1..N] for N global segments found"""
+    and put all label IDs in range [1..N] for N global segments found"""
     faces = adjacent_faces(block_indices, faces)
     # FIX float parameters
     # print("Used labels:", used_labels, "Type:", type(used_labels))
@@ -834,7 +868,8 @@ def determine_merge_relabeling(block_indices, faces, used_labels):
 
     label_groups = block_face_adjacency_graph(faces, label_range)
     new_labeling = scipy.sparse.csgraph.connected_components(
-        label_groups, directed=False)[1]
+        label_groups, directed=False
+    )[1]
     # XXX: new_labeling is returned as int32. Loses half range. Potentially a problem.
     unused_labels = np.ones(label_range + 1, dtype=bool)
     unused_labels[used_labels] = 0
@@ -847,16 +882,16 @@ def determine_merge_relabeling(block_indices, faces, used_labels):
 def adjacent_faces(block_indices, faces):
     """Find faces which touch and pair them together in new data structure"""
     face_pairs = []
-    faces_index_lookup = {a:b for a, b in zip(block_indices, faces)}
+    faces_index_lookup = {a: b for a, b in zip(block_indices, faces)}
     for block_index in block_indices:
         for ax in range(len(block_index)):
             neighbor_index = np.array(block_index)
             neighbor_index[ax] += 1
             neighbor_index = tuple(neighbor_index)
             try:
-                a = faces_index_lookup[block_index][2*ax + 1]
-                b = faces_index_lookup[neighbor_index][2*ax]
-                face_pairs.append( np.concatenate((a, b), axis=ax) )
+                a = faces_index_lookup[block_index][2 * ax + 1]
+                b = faces_index_lookup[neighbor_index][2 * ax]
+                face_pairs.append(np.concatenate((a, b), axis=ax))
             except KeyError:
                 continue
     return face_pairs
@@ -879,10 +914,15 @@ def block_face_adjacency_graph(faces, nlabels):
         b = shrink_labels(face[sl1], 1.0)
         face = np.concatenate((a, b), axis=np.argmin(a.shape))
         structure = scipy.ndimage.generate_binary_structure(face.ndim, 1)
+        mapped = dask_image.ndmeasure._utils._label._across_block_label_grouping(
+            face, structure
+        )
         all_mappings.append(mapped)
     i, j = np.concatenate(all_mappings, axis=1)
     v = np.ones_like(i)
-    return scipy.sparse.coo_matrix((v, (i, j)), shape=(nlabels+1, nlabels+1)).tocsr()
+    return scipy.sparse.coo_matrix(
+        (v, (i, j)), shape=(nlabels + 1, nlabels + 1)
+    ).tocsr()
 
 
 def shrink_labels(plane, threshold):
@@ -925,5 +965,3 @@ def merge_boxes(boxes):
             local_union.append(slice(start, stop))
         box_union = tuple(local_union)
     return box_union
-
-
