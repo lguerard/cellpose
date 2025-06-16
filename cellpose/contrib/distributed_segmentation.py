@@ -535,6 +535,9 @@ def read_preprocess_and_segment(
     for pp_step in preprocessing_steps:
         pp_step[1]["crop"] = crop
         image = pp_step[0](image, **pp_step[1])
+
+    if image.ndim > input_zarr.ndim:
+        image = image[0, :, :, :, :]  # remove channel dimension if present
     log_file = None
     if worker_logs_directory is not None:
         log_file = f"dask_worker_{distributed.get_worker().name}.log"
