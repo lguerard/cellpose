@@ -543,7 +543,7 @@ def read_preprocess_and_segment(
         log_file = f"dask_worker_{distributed.get_worker().name}.log"
         log_file = pathlib.Path(worker_logs_directory).joinpath(log_file)
     cellpose.io.logger_setup(stdout_file_replacement=log_file)
-    model = cellpose.models.CellposeModel(**model_kwargs)
+    model = cellpose.models.Cellpose(**model_kwargs)
     segmentation = model.eval(image, **eval_kwargs)[0].astype(np.uint32)
 
     if input_zarr.ndim == 4:
