@@ -332,7 +332,7 @@ def block_faces(segmentation):
 @cluster
 def distributed_eval(
     input_xr,
-    blocksize,
+    blocksize=None,
     write_path=None,
     mask=None,
     preprocessing_steps=None,
@@ -344,8 +344,7 @@ def distributed_eval(
 ):
     """
     Evaluate a cellpose model on overlapping blocks of a big image using xarray and Dask.
-    Returns an xarray.DataArray with the segmentation results (in memory, chunked).
-    If write_path is provided, saves the result to disk as NetCDF.
+    Handles any input shape robustly. Always uses blocksize 11 for T, full for C and Z if present, 128 for Y and X if present, and full for any other dimension.
     """
     if preprocessing_steps is None:
         preprocessing_steps = []
@@ -353,6 +352,20 @@ def distributed_eval(
         model_kwargs = {}
     if eval_kwargs is None:
         eval_kwargs = {}
+    dims = list(input_xr.dims)
+    shape = input_xr.shape
+    # Robust blocksize logic for any shape
+    blocksize_dict = {}
+    for i, d in enumerate(dims):
+        if d == "T":
+            blocksize_dict[d] = 11
+        elif d == "C" or d == "Z":
+            blocksize_dict[d] = shape[i]
+        elif d == "Y" or d == "X":
+            blocksize_dict[d] = 128
+        else:
+            blocksize_dict[d] = shape[i]
+    blocksize = tuple(blocksize_dict[d] for d in dims)
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     worker_logs_dirname = f"dask_worker_logs_{timestamp}"
     worker_logs_dir = pathlib.Path().absolute().joinpath(worker_logs_dirname)
@@ -361,19 +374,18 @@ def distributed_eval(
         eval_kwargs["diameter"] = 30
     overlap = eval_kwargs["diameter"] * 2
     block_indices, block_crops = get_block_crops(
-        input_xr.shape,
+        shape,
         blocksize,
         overlap,
         mask,
     )
-    temp_shape = input_xr.shape
+    temp_shape = shape
     temp_chunks = blocksize
     temp_da = xr.DataArray(
         np.zeros(temp_shape, dtype=np.uint32),
-        dims=input_xr.dims,
-        chunks={dim: size for dim, size in zip(input_xr.dims, temp_chunks)},
+        dims=dims,
+        chunks={dim: size for dim, size in zip(dims, temp_chunks)},
     )
-    # Distributed blockwise processing, all in xarray
     futures = cluster.client.map(
         process_block,
         block_indices,
@@ -392,7 +404,6 @@ def distributed_eval(
     boxes = [box for sublist in boxes_ for box in sublist]
     box_ids = np.concatenate(box_ids_).astype(int)
     new_labeling = determine_merge_relabeling(block_indices, faces, box_ids)
-    # Relabeling step (in memory, xarray)
     relabeled = temp_da.copy()
     relabeled.data = new_labeling[relabeled.data]
     if write_path is not None:
