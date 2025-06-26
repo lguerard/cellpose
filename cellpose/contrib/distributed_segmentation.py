@@ -1,11 +1,9 @@
 # stdlib imports
-import datetime
 import functools
 import getpass
 import glob
 import os
 import pathlib
-import tempfile
 
 # distributed dependencies
 import dask
@@ -160,91 +158,52 @@ def cluster(func):
 
 ######################## the function to run on each block ####################
 def process_block(
-    block_index,
-    crop,
-    input_xr,
+    block,
     model_kwargs,
     eval_kwargs,
-    blocksize,
-    overlap,
-    output_xr,
     preprocessing_steps=None,
-    worker_logs_directory=None,
-    test_mode=False,
 ):
     """
-    Preprocess and segment one block, of many, with eventual merger of all blocks in mind.
-    Supports multi-channel images (channel-first convention).
+    Segment a single block of the image using Cellpose.
 
     Parameters
     ----------
-    block_index : tuple
-        The (i, j, k, ...) index of the block in the overall block grid.
-    crop : tuple of slice
-        The bounding box of the data to read from the input_xr array.
-    input_xr : xarray.DataArray
-        The image data to segment.
-    preprocessing_steps : list, optional
-        List of (function, kwargs) tuples for preprocessing.
+    block : np.ndarray
+        The image block to segment.
     model_kwargs : dict
         Arguments passed to cellpose.models.Cellpose or CellposeModel.
     eval_kwargs : dict
         Arguments passed to the eval function of the Cellpose model.
-    blocksize : tuple
-        The shape of blocks without overlaps.
-    overlap : int
-        The number of voxels added to the blocksize for context.
-    output_xr : xarray.DataArray
-        Where segments can be stored temporarily before merger.
-    worker_logs_directory : str, optional
-        Directory for worker logs.
-    test_mode : bool, optional
-        If True, returns segments and boxes instead of writing to disk.
+    preprocessing_steps : list, optional
+        List of (function, kwargs) tuples for preprocessing.
 
     Returns
     -------
-    If test_mode is False:
-        faces : list of numpy.ndarray
-        boxes : list of tuple of slices
-        box_ids : numpy.ndarray
-    If test_mode is True:
-        segments : numpy.ndarray
-        boxes : list of tuple of slices
-        box_ids : numpy.ndarray
+    np.ndarray
+        Segmentation mask for the block.
 
     Examples
     --------
-    >>> faces, boxes, box_ids = process_block(...)
+    >>> block = np.zeros((1, 3, 128, 128), dtype=np.uint16)
+    >>> process_block(block, {}, {})
+    array([[[[0, 0, ...]]]], dtype=np.uint32)
     """
     if preprocessing_steps is None:
         preprocessing_steps = []
-    print(f"RUNNING BLOCK: {block_index}\tREGION: {crop}", flush=True)
-    image = input_xr[crop].values
+    image = block
     # If image has a channel dimension, ensure it is passed correctly to Cellpose
     if image.ndim == 4:  # (C, Z, Y, X)
-        # Cellpose expects (Z, Y, X, C) or (Y, X, C) for 2D
         image = np.moveaxis(image, 0, -1)  # Move channel to last axis
-    elif image.ndim == 3 and input_xr.shape[0] <= 4:  # (C, Y, X) or (C, Z, Y)
+    elif image.ndim == 3 and image.shape[0] <= 4:  # (C, Y, X) or (C, Z, Y)
         image = np.moveaxis(image, 0, -1)
     for pp_step in preprocessing_steps:
-        pp_step[1]["crop"] = crop
         image = pp_step[0](image, **pp_step[1])
     model = models.CellposeModel(**model_kwargs)
     segmentation = model.eval(image, **eval_kwargs)[0].astype(np.uint32)
     # If input was 4D, add back singleton channel if needed
-    if input_xr.ndim == 4 and segmentation.ndim == 3:
+    if block.ndim == 4 and segmentation.ndim == 3:
         segmentation = np.expand_dims(segmentation, axis=0)
-    segmentation, crop = remove_overlaps(segmentation, crop, overlap, blocksize)
-    boxes = bounding_boxes_in_global_coordinates(segmentation, crop)
-    nblocks = get_nblocks(input_xr.shape, blocksize)
-    segmentation, remap = global_segment_ids(segmentation, block_index, nblocks)
-    if remap[0] == 0:
-        remap = remap[1:]
-    if test_mode:
-        return segmentation, boxes, remap
-    output_xr[crop] = segmentation
-    faces = block_faces(segmentation)
-    return faces, boxes, remap
+    return segmentation
 
 
 # ----------------------- component functions ---------------------------------#
@@ -345,6 +304,38 @@ def distributed_eval(
     """
     Evaluate a cellpose model on overlapping blocks of a big image using xarray and Dask.
     Handles any input shape robustly. Always uses blocksize 11 for T, full for C and Z if present, 128 for Y and X if present, and full for any other dimension.
+
+    Parameters
+    ----------
+    input_xr : xarray.DataArray
+        The input image data.
+    blocksize : tuple, optional
+        Block size for chunking. If None, inferred from dims.
+    write_path : str, optional
+        Path to write the output segmentation.
+    mask : np.ndarray, optional
+        Optional mask to restrict processing.
+    preprocessing_steps : list, optional
+        List of (function, kwargs) tuples for preprocessing.
+    model_kwargs : dict, optional
+        Arguments for Cellpose model.
+    eval_kwargs : dict, optional
+        Arguments for model.eval.
+    cluster : dask.distributed.Client, optional
+        Dask cluster client.
+    cluster_kwargs : dict, optional
+        Arguments for cluster creation.
+    temporary_directory : str, optional
+        Temporary directory for logs.
+
+    Returns
+    -------
+    xarray.DataArray
+        Segmentation result.
+
+    Examples
+    --------
+    >>> seg, boxes = distributed_eval(input_xr)
     """
     if preprocessing_steps is None:
         preprocessing_steps = []
@@ -366,49 +357,22 @@ def distributed_eval(
         else:
             blocksize_dict[d] = shape[i]
     blocksize = tuple(blocksize_dict[d] for d in dims)
-    timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-    worker_logs_dirname = f"dask_worker_logs_{timestamp}"
-    worker_logs_dir = pathlib.Path().absolute().joinpath(worker_logs_dirname)
-    worker_logs_dir.mkdir()
-    if "diameter" not in eval_kwargs.keys():
-        eval_kwargs["diameter"] = 30
-    overlap = eval_kwargs["diameter"] * 2
-    block_indices, block_crops = get_block_crops(
-        shape,
-        blocksize,
-        overlap,
-        mask,
-    )
-    temp_shape = shape
-    temp_chunks = blocksize
-    temp_da = xr.DataArray(
-        np.zeros(temp_shape, dtype=np.uint32),
-        dims=dims,
-    ).chunk({dim: size for dim, size in zip(dims, temp_chunks)})
-    futures = cluster.client.map(
+    # rechunk input_xr to match blocksize
+    input_xr = input_xr.chunk({dim: size for dim, size in zip(dims, blocksize)})
+    # Use map_blocks for blockwise segmentation
+    seg_xr = input_xr.map_blocks(
         process_block,
-        block_indices,
-        block_crops,
-        input_xr=input_xr,
-        preprocessing_steps=preprocessing_steps,
-        model_kwargs=model_kwargs,
-        eval_kwargs=eval_kwargs,
-        blocksize=blocksize,
-        overlap=overlap,
-        output_xr=temp_da,
-        worker_logs_directory=str(worker_logs_dir),
+        kwargs=dict(
+            model_kwargs=model_kwargs,
+            eval_kwargs=eval_kwargs,
+            preprocessing_steps=preprocessing_steps,
+        ),
+        template=xr.zeros_like(input_xr, dtype=np.uint32),
     )
-    results = cluster.client.gather(futures)
-    faces, boxes_, box_ids_ = list(zip(*results))
-    boxes = [box for sublist in boxes_ for box in sublist]
-    box_ids = np.concatenate(box_ids_).astype(int)
-    new_labeling = determine_merge_relabeling(block_indices, faces, box_ids)
-    relabeled = temp_da.copy()
-    relabeled.data = new_labeling[relabeled.data]
     if write_path is not None:
-        relabeled.astype(np.uint32).to_netcdf(write_path)
-    merged_boxes = merge_all_boxes(boxes, new_labeling[box_ids])
-    return relabeled, merged_boxes
+        seg_xr.astype(np.uint32).to_netcdf(write_path)
+    # For now, boxes/merging not supported in map_blocks version
+    return seg_xr, None
 
 
 # ----------------------- component functions ---------------------------------#
