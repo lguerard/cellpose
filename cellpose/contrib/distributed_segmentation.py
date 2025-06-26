@@ -88,17 +88,10 @@ def _config_path(config_name):
 
 
 def _modify_dask_config(config, config_name=DEFAULT_CONFIG_FILENAME):
+    """
+    Set Dask config in memory only, do not write any config file to disk.
+    """
     dask.config.set(config)
-    with open(_config_path(config_name), "w") as f:
-        import yaml
-
-        yaml.dump(dask.config.config, f, default_flow_style=False)
-
-
-def _remove_config_file(config_name=DEFAULT_CONFIG_FILENAME):
-    config_path = _config_path(config_name)
-    if os.path.exists(config_path):
-        os.remove(config_path)
 
 
 class myLocalCluster(distributed.LocalCluster):
@@ -133,8 +126,6 @@ class myLocalCluster(distributed.LocalCluster):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        if not self.persist_config:
-            _remove_config_file(self.config_name)
         self.client.close()
         super().__exit__(exc_type, exc_value, traceback)
 
