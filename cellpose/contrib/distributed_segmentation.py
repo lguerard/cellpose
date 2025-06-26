@@ -384,8 +384,7 @@ def distributed_eval(
     temp_da = xr.DataArray(
         np.zeros(temp_shape, dtype=np.uint32),
         dims=dims,
-        chunks={dim: size for dim, size in zip(dims, temp_chunks)},
-    )
+    ).chunk({dim: size for dim, size in zip(dims, temp_chunks)})
     futures = cluster.client.map(
         process_block,
         block_indices,
